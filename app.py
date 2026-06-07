@@ -1,4 +1,5 @@
 import os
+import io
 import base64
 import requests
 from flask import Flask, request, abort
@@ -10,6 +11,7 @@ from linebot.models import (
     TextMessage,
     TextSendMessage,
     ImageMessage,
+    FileMessage,
 )
 
 app = Flask(__name__)
@@ -23,7 +25,6 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- Bot identity (used to detect @mentions in groups) ---
-# Fetched once at startup. Falls back to None if call fails.
 try:
     BOT_INFO = line_bot_api.get_bot_info()
     BOT_USER_ID = BOT_INFO.user_id
@@ -35,25 +36,26 @@ except Exception:
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 
 SYSTEM_PROMPT = (
-    "You are the Fujisan Winery assistant. "
-    "Reply concisely and in the same language as the user's message "
-    "(Japanese or English). When the user sends a vineyard photo, "
-    "describe what you see and give viticulture observations "
-    "(canopy, leaves, disease signs, fruit set, etc.). "
-    "When asked factual questions, use up-to-date web information."
+    "You are the Fujisan Winery assistant for a Japanese winery team. "
+    "Always reply in the same language as the user (Japanese or English). "
+    "Be concise (3-6 bullet points unless asked for more detail). "
+    "For vineyard photos, comment on vine health, canopy, leaves, disease signs, fruit set. "
+    "For wine labels or business documents, summarize the key contents. "
+    "For PDFs and spreadsheets, give a structured summary of what they contain "
+    "and flag anything notable (deadlines, large numbers, anomalies). "
+    "Use up-to-date web information when answering factual questions."
 )
 
 
-# ---------------- helpers ----------------
+# ---------------- Perplexity helpers ----------------
 
-def ask_perplexity_text(user_text: str) -> str:
-    """Send a text question to Perplexity Sonar and return the answer."""
+def ask_perplexity_text(user_text: str, model: str = "sonar") -> str:
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "sonar",
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
@@ -68,7 +70,6 @@ def ask_perplexity_text(user_text: str) -> str:
 
 
 def ask_perplexity_image(image_bytes: bytes, user_caption: str = "") -> str:
-    """Send an image (base64) plus optional caption to a vision-capable Sonar model."""
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
         "Content-Type": "application/json",
@@ -77,8 +78,8 @@ def ask_perplexity_image(image_bytes: bytes, user_caption: str = "") -> str:
     data_url = f"data:image/jpeg;base64,{b64}"
     user_prompt = user_caption or (
         "Please analyze this photo for Fujisan Winery. "
-        "If it's a vineyard or vine photo, comment on vine health, "
-        "canopy, leaves, fruit, and anything notable. "
+        "If it's a vineyard or vine photo, comment on vine health, canopy, "
+        "leaves, fruit, and anything notable. "
         "If it's a wine label or document, summarize what it shows."
     )
     payload = {
@@ -95,19 +96,66 @@ def ask_perplexity_image(image_bytes: bytes, user_caption: str = "") -> str:
         ],
     }
     try:
-        r = requests.post(PERPLEXITY_URL, headers=headers, json=payload, timeout=90)
+        r = requests.post(PERPLEXITY_URL, headers=headers, json=payload, timeout=120)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"(error analyzing image: {e})"
 
 
-def is_addressed_to_bot(event) -> bool:
-    """In 1:1 chats always respond. In groups/rooms, only respond when mentioned."""
-    source_type = event.source.type  # 'user', 'group', or 'room'
-    if source_type == "user":
-        return True
+# ---------------- File parsers ----------------
 
+def extract_pdf_text(data: bytes, max_chars: int = 12000) -> str:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        chunks = []
+        for page in reader.pages:
+            chunks.append(page.extract_text() or "")
+        text = "\n".join(chunks).strip()
+        return text[:max_chars] if text else "(no extractable text in PDF)"
+    except Exception as e:
+        return f"(PDF parse error: {e})"
+
+
+def extract_xlsx_summary(data: bytes, max_chars: int = 8000) -> str:
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        out = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            out.append(f"## Sheet: {sheet_name}")
+            row_count = 0
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    out.append(" | ".join(cells))
+                    row_count += 1
+                if row_count >= 60:
+                    out.append("... (truncated)")
+                    break
+        joined = "\n".join(out)
+        return joined[:max_chars] if joined else "(empty workbook)"
+    except Exception as e:
+        return f"(Excel parse error: {e})"
+
+
+def extract_csv_summary(data: bytes, max_chars: int = 8000) -> str:
+    try:
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()[:60]
+        if len(text.splitlines()) > 60:
+            lines.append("... (truncated)")
+        joined = "\n".join(lines)
+        return joined[:max_chars]
+    except Exception as e:
+        return f"(CSV parse error: {e})"
+
+
+# ---------------- LINE helpers ----------------
+
+def is_mentioned(event) -> bool:
     msg = event.message
     mention = getattr(msg, "mention", None)
     if mention and getattr(mention, "mentionees", None):
@@ -118,14 +166,22 @@ def is_addressed_to_bot(event) -> bool:
 
 
 def strip_mention(text: str) -> str:
-    """Remove leading @MentionName so the bot doesn't quote itself back."""
     parts = text.strip().split(" ", 1)
     if parts and parts[0].startswith("@"):
         return parts[1] if len(parts) > 1 else ""
     return text
 
 
-# ---------------- routes ----------------
+def download_content(message_id: str) -> bytes:
+    content = line_bot_api.get_message_content(message_id)
+    return b"".join(chunk for chunk in content.iter_content())
+
+
+def safe_reply(event, text: str):
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text[:4900]))
+
+
+# ---------------- Event handlers ----------------
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -143,34 +199,74 @@ def health():
     return f"Fujisan LINE bot running. Bot: {BOT_DISPLAY_NAME}"
 
 
-# ---------------- LINE event handlers ----------------
-
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
-    if not is_addressed_to_bot(event):
+    source_type = event.source.type  # 'user', 'group', or 'room'
+
+    # In 1:1 chats, always respond.
+    # In groups, only respond when @mentioned.
+    if source_type != "user" and not is_mentioned(event):
         return
+
     user_text = strip_mention(event.message.text)
     if not user_text:
         reply = "はい、何かお手伝いできますか? / Yes, how can I help?"
     else:
         reply = ask_perplexity_text(user_text)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
+    safe_reply(event, reply)
 
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
-    # In groups, only analyze images if the bot is mentioned in the same message.
-    # (LINE attaches mentions to text, not images, so for images we require a
-    # 1:1 chat OR a follow-up text mention. Simplest rule: always analyze in 1:1,
-    # ignore in groups unless someone @mentions the bot in a text reply.)
-    if event.source.type != "user":
+    """Analyze every image, in 1:1 chats AND in groups."""
+    try:
+        image_bytes = download_content(event.message.id)
+        analysis = ask_perplexity_image(image_bytes)
+    except Exception as e:
+        analysis = f"(error: {e})"
+    safe_reply(event, analysis)
+
+
+@handler.add(MessageEvent, message=FileMessage)
+def handle_file(event):
+    """Analyze PDFs, Excel, and CSV files in any chat."""
+    file_name = (event.message.file_name or "").lower()
+    try:
+        data = download_content(event.message.id)
+    except Exception as e:
+        safe_reply(event, f"(could not download file: {e})")
         return
 
-    message_id = event.message.id
-    content = line_bot_api.get_message_content(message_id)
-    image_bytes = b"".join(chunk for chunk in content.iter_content())
-    analysis = ask_perplexity_image(image_bytes)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=analysis[:4900]))
+    if file_name.endswith(".pdf"):
+        body = extract_pdf_text(data)
+        prompt = (
+            f"The team shared a PDF named '{event.message.file_name}'. "
+            "Summarize the key contents in 4-8 bullets, in the document's "
+            "primary language. Flag any deadlines, large numbers, or "
+            "anomalies. Here is the extracted text:\n\n" + body
+        )
+        reply = ask_perplexity_text(prompt, model="sonar-pro")
+    elif file_name.endswith((".xlsx", ".xls")):
+        body = extract_xlsx_summary(data)
+        prompt = (
+            f"The team shared a spreadsheet named '{event.message.file_name}'. "
+            "Summarize what it contains, list the sheets, and highlight any "
+            "notable totals, anomalies, or trends. Here is a sample of rows:\n\n" + body
+        )
+        reply = ask_perplexity_text(prompt, model="sonar-pro")
+    elif file_name.endswith(".csv"):
+        body = extract_csv_summary(data)
+        prompt = (
+            f"The team shared a CSV named '{event.message.file_name}'. "
+            "Describe the columns, summarize the data, and highlight anything "
+            "notable. Here is a sample:\n\n" + body
+        )
+        reply = ask_perplexity_text(prompt, model="sonar-pro")
+    else:
+        # Unsupported file type — stay silent to avoid noise
+        return
+
+    safe_reply(event, reply)
 
 
 if __name__ == "__main__":
