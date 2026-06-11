@@ -40,16 +40,15 @@ except Exception:
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 
 SYSTEM_PROMPT = (
-    "You are the Fujisan Winery assistant for a Japanese winery team chat group. "
-    "Always reply in the same language as the most recent user message (Japanese or English). "
-    "Be concise (3-6 bullets unless asked for more). "
-    "You will be given the recent group conversation as context, plus a specific item to analyze "
-    "(an image, a file, or a question). Use the conversation context to make your reply relevant "
-    "to what the team has been discussing. "
-    "For vineyard photos: comment on vine health, canopy, leaves, disease signs, fruit set. "
-    "For wine labels or business documents: summarize key contents. "
-    "For PDFs/spreadsheets: give a structured summary; flag deadlines, large numbers, anomalies. "
-    "Use up-to-date web information when answering factual questions."
+    "あなたは富士山ワイナリーのチームチャット用アシスタントです。 "
+    "必ず日本語で返信してください。ユーザーが英語や他の言語で書いていても、返信は日本語のみで行ってください。 "
+    "簡潔に答えてください（特に指示がない限り3〜6個の箇条書きで）。 "
+    "最近のグループ会話がコンテキストとして与えられ、それに加えて分析対象（画像、ファイル、質問）が示されます。 "
+    "チームが議論している内容に関連した返信になるよう、会話のコンテキストを活用してください。 "
+    "ぶどう畑の写真の場合：樹勢、樹冠、葉、病害の兆候、結実状況についてコメントしてください。 "
+    "ワインラベルやビジネス文書の場合：主要な内容を要約してください。 "
+    "PDFやスプレッドシートの場合：構造的に要約し、締切、大きな数値、異常値を指摘してください。 "
+    "事実関係の質問には、最新のウェブ情報を活用して回答してください。"
 )
 
 # --- In-memory chat history per group/room/user ---
@@ -270,14 +269,14 @@ def handle_text(event):
 
     question = strip_mention(text).strip()
     if not question:
-        question = "Please give a helpful comment about the recent conversation."
+        question = "最近の会話について役に立つコメントをお願いします。"
 
     prompt = (
-        "Recent group conversation (oldest first):\n"
+        "最近のグループ会話（古い順）:\n"
         f"{history_context(event)}\n\n"
         "----\n"
-        f"The latest message asks: {question}\n\n"
-        "Reply helpfully, taking the recent conversation into account."
+        f"最新のメッセージ: {question}\n\n"
+        "最近の会話を踏まえて、日本語で丁寧に返信してください。"
     )
     reply = ask_perplexity_text(prompt, model="sonar")
     log_message(event, f"{BOT_DISPLAY_NAME}: {reply[:200]}")
@@ -294,12 +293,12 @@ def handle_image(event):
         return
 
     prompt = (
-        "Recent group conversation (oldest first):\n"
+        "最近のグループ会話（古い順）:\n"
         f"{history_context(event)}\n\n"
         "----\n"
-        "A team member just shared the attached photo. "
-        "Analyze it (vines/canopy/leaves/fruit/disease/label/etc.) and tie your "
-        "comment to the recent conversation if relevant. Reply in the team's language."
+        "チームメンバーが添付の写真を共有しました。 "
+        "写真を分析し（ぶどうの樹／樹冠／葉／果実／病害／ラベル等）、関連があれば最近の会話と結び付けてコメントしてください。 "
+        "返信は必ず日本語で行ってください。"
     )
     reply = ask_perplexity_image(image_bytes, prompt)
     log_message(event, f"{BOT_DISPLAY_NAME}: {reply[:200]}")
@@ -331,14 +330,14 @@ def handle_file(event):
         return  # unsupported file type, stay silent
 
     prompt = (
-        "Recent group conversation (oldest first):\n"
+        "最近のグループ会話（古い順）:\n"
         f"{history_context(event)}\n\n"
         "----\n"
-        f"A team member just shared a {kind} named '{file_name}'. "
-        "Summarize the key contents in 4-8 bullets in the team's language, "
-        "flag anything notable (deadlines, large numbers, anomalies), and tie "
-        "your comment to the recent conversation if relevant.\n\n"
-        f"File contents:\n{body}"
+        f"チームメンバーが「{file_name}」という{kind}を共有しました。 "
+        "主要な内容を4〜8個の箇条書きで日本語で要約し、 "
+        "注目すべき点（締切、大きな数値、異常値など）を指摘してください。 "
+        "関連があれば最近の会話と結び付けてください。返信は必ず日本語で行ってください。\n\n"
+        f"ファイル内容:\n{body}"
     )
     reply = ask_perplexity_text(prompt, model="sonar-pro")
     log_message(event, f"{BOT_DISPLAY_NAME}: {reply[:200]}")
