@@ -1,4 +1,3 @@
-text
 """
 vineyard_check.py
 Runs on a Render Cron schedule. For each new file in the Vineyard AI Drive
