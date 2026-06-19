@@ -241,6 +241,7 @@ def extract_csv_summary(data: bytes, max_chars: int = 8000) -> str:
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+    print("WEBHOOK BODY:", body, flush=True) 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
