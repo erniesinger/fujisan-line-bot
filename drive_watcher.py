@@ -2,18 +2,27 @@
 drive_watcher.py
 Lists files in the Vineyard AI Google Drive folder, dedupes against a seen-list,
 returns metadata + downloaded bytes for any new files.
+
+Env vars required:
+- GOOGLE_SERVICE_ACCOUNT_JSON: full JSON contents of the service account key
+- VINEYARD_FOLDER_ID:         Drive folder id (the Vineyard AI folder)
 """
 
 import os
 import io
 import json
+from datetime import datetime, timezone
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-SEEN_PATH = "/tmp/seen_files.json"
+TMP_SEEN_PATH = "/tmp/seen_files.json"
+BASELINE_SEEN_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "seen_files.json",
+)
 
 
 def _drive_service():
@@ -23,17 +32,29 @@ def _drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def _load_seen():
+def _load_baseline():
     try:
-        with open(SEEN_PATH, "r", encoding="utf-8") as f:
+        with open(BASELINE_SEEN_PATH, "r", encoding="utf-8") as f:
             return set(json.load(f))
     except Exception:
         return set()
 
 
-def _save_seen(seen):
+def _load_tmp_seen():
     try:
-        with open(SEEN_PATH, "w", encoding="utf-8") as f:
+        with open(TMP_SEEN_PATH, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _load_seen():
+    return _load_baseline() | _load_tmp_seen()
+
+
+def _save_tmp_seen(seen):
+    try:
+        with open(TMP_SEEN_PATH, "w", encoding="utf-8") as f:
             json.dump(sorted(seen), f)
     except Exception:
         pass
@@ -84,16 +105,17 @@ def get_new_files(folder_id, mark_seen=True):
         f["data"] = data
         new.append(f)
     if mark_seen and new:
+        tmp_seen = _load_tmp_seen()
         for f in new:
-            seen.add(f["id"])
-        _save_seen(seen)
+            tmp_seen.add(f["id"])
+        _save_tmp_seen(tmp_seen)
     return new
 
 
 def seed_seen(folder_id):
     files = list_folder(folder_id)
     seen = {f["id"] for f in files}
-    _save_seen(seen)
+    _save_tmp_seen(seen)
     print(f"[drive_watcher] seeded {len(seen)} existing file(s) as seen", flush=True)
     return len(seen)
 
